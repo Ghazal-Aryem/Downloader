@@ -43,7 +43,6 @@ st.markdown("""
 
 # ===== Utility Functions =====
 def is_valid_url(url):
-    """Check if the URL is valid."""
     try:
         result = urlparse(url)
         return all([result.scheme, result.netloc])
@@ -51,7 +50,6 @@ def is_valid_url(url):
         return False
 
 def is_supported_platform(url):
-    """Check if the URL is from supported platforms."""
     supported_domains = [
         'facebook.com', 'fb.watch', 'instagram.com', 'instagr.am',
         'youtube.com', 'youtu.be', 'tiktok.com', 'twitter.com',
@@ -60,12 +58,18 @@ def is_supported_platform(url):
     return any(domain in url.lower() for domain in supported_domains)
 
 def get_video_info(url):
-    """Fetch video metadata without downloading."""
     ydl_opts = {
         'quiet': True, 
         'no_warnings': True,
         'extract_flat': False
     }
+    
+    # Instagram-specific options
+    if 'instagram.com' in url.lower():
+        ydl_opts.update({
+            'extract_flat': False,
+        })
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -75,26 +79,32 @@ def get_video_info(url):
         return None
 
 def download_video(url, quality='best'):
-    """Download video with proper error handling for deployment."""
     temp_dir = tempfile.gettempdir()
     timestamp = int(time.time())
     
     try:
-        # Simplified format selection for better compatibility
-        if quality == 'best':
-            format_selection = 'best[height<=720]/best'
-        else:
-            format_selection = 'worst'
+        format_selection = 'best[height<=720]/best' if quality == 'best' else 'worst'
         
+        # Base options for all platforms
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, f'download_{timestamp}.%(ext)s'),
             'format': format_selection,
             'quiet': True,
             'no_warnings': True,
             'nooverwrites': True,
-            'socket_timeout': 30,
-            'retries': 3,
         }
+        
+        # Instagram-specific options to handle rate limits
+        if 'instagram.com' in url.lower():
+            ydl_opts.update({
+                'format': 'best',
+                'extract_flat': False,
+                'sleep_interval': 2,  # Add delay between requests
+                'max_sleep_interval': 5,
+                'retries': 10,  # More retries for Instagram
+                'fragment_retries': 10,
+                'skip_unavailable_fragments': True,
+            })
         
         downloaded_files = []
         
@@ -125,7 +135,25 @@ def download_video(url, quality='best'):
         return None
         
     except Exception as e:
-        st.error(f"Download failed: {str(e)}")
+        error_msg = str(e)
+        
+        # Handle Instagram-specific errors
+        if 'instagram.com' in url.lower():
+            if 'rate-limit' in error_msg.lower() or 'login required' in error_msg.lower():
+                st.error("""
+                ❌ Instagram Rate Limit Reached
+                
+                **Solutions to try:**
+                - Wait 1-2 hours and try again
+                - Try a different Instagram video
+                - Use YouTube, TikTok, or other platforms instead
+                - Instagram often blocks automated downloads
+                """)
+            else:
+                st.error(f"Instagram error: {error_msg}")
+        else:
+            st.error(f"Download failed: {error_msg}")
+        
         # Clean up any partial files
         for pattern in [f'download_{timestamp}.*', f'*{timestamp}*']:
             for file_path in glob.glob(os.path.join(temp_dir, pattern)):
@@ -139,13 +167,14 @@ def download_video(url, quality='best'):
 def main():
     st.markdown('<h1 class="main-header">📥 Social Media Video Downloader</h1>', unsafe_allow_html=True)
 
-    # Deployment warning
+    # Platform limitations info
     st.markdown("""
-    <div class="">
-    <strong>⚠️ Note for Deployment:</strong> This app works on most cloud platforms, but some restrictions may apply:
-    - Large files may have size limits
-    - Some platforms may block video downloads
-    - Performance depends on the hosting platform
+    <div class="warning-box">
+    <strong>⚠️ Platform Limitations:</strong>
+    - <strong>Instagram:</strong> May have rate limits and require waiting between downloads
+    - <strong>YouTube:</strong> Most reliable
+    - <strong>TikTok:</strong> Usually works well
+    - <strong>Facebook/Reddit:</strong> May require authentication for some content
     </div>
     """, unsafe_allow_html=True)
 
@@ -153,29 +182,21 @@ def main():
         st.header("About")
         st.write("""
         Download videos from:
-        - YouTube
-        - Instagram
-        - Facebook
-        - TikTok
-        - Twitter/X
-        - Reddit
+        - ✅ YouTube (Best)
+        - ✅ TikTok (Good)
+        - ⚠️ Instagram (Rate Limited)
+        - ⚠️ Facebook (Some limits)
+        - ✅ Twitter/X
+        - ✅ Reddit
         """)
 
         st.markdown("---")
-        st.header("Instructions")
-        st.write("""
-        1. Paste video URL
-        2. Get video info
-        3. Download video
-        4. Save to device
-        """)
-
-        st.markdown("---")
-        st.header("Limitations")
+        st.header("Tips for Success")
         st.info("""
-        - Some private/age-restricted videos won't work
-        - Platform terms of service apply
-        - Respect copyright laws
+        - **For Instagram:** Try again after 1-2 hours if rate limited
+        - **Use YouTube/TikTok** for most reliable downloads
+        - **Private videos** won't work
+        - **Large videos** take longer to download
         """)
 
         if st.button("🔄 Clear Session"):
@@ -191,7 +212,7 @@ def main():
     st.markdown("### 🔗 Enter Video URL")
     url = st.text_input(
         "Paste Video URL:",
-        placeholder="https://www.youtube.com/watch?v=... or https://instagram.com/reel/...",
+        placeholder="https://www.youtube.com/watch?v=... or https://tiktok.com/...",
         label_visibility="collapsed"
     )
 
@@ -199,11 +220,18 @@ def main():
         if not is_valid_url(url):
             st.error("❌ Please enter a valid URL.")
         elif not is_supported_platform(url):
-            st.warning("⚠️ This platform might not be fully supported.")
+            st.warning("⚠️ This platform might not be supported.")
         else:
-            st.success("✅ Valid URL detected!")
+            # Show platform-specific info
+            if 'instagram.com' in url.lower():
+                st.warning("⚠️ Instagram: May have rate limits. If download fails, try again later.")
+            elif 'youtube.com' in url.lower() or 'youtu.be' in url.lower():
+                st.success("✅ YouTube: Usually works well!")
+            elif 'tiktok.com' in url.lower():
+                st.success("✅ TikTok: Usually works well!")
+            else:
+                st.success("✅ Valid URL detected!")
 
-    # Quality selection
     quality = st.selectbox(
         "Select Video Quality:",
         ["Best Available", "Lowest Quality"],
@@ -231,7 +259,7 @@ def main():
             if not url or not is_valid_url(url):
                 st.error("Please enter a valid URL first.")
             else:
-                with st.spinner("Downloading video... Please wait..."):
+                with st.spinner("Downloading video... This may take a while..."):
                     q = 'best' if quality == "Best Available" else 'worst'
                     video_data = download_video(url, q)
                     
@@ -240,7 +268,8 @@ def main():
                         file_size_mb = len(video_data) / (1024 * 1024)
                         st.success(f"✅ Downloaded successfully! File size: {file_size_mb:.1f} MB")
                     else:
-                        st.error("❌ Download failed. Try a different URL or quality.")
+                        # Error message is already shown in download_video function
+                        pass
 
     # Video Info Display
     if st.session_state.video_info:
@@ -297,7 +326,7 @@ def main():
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: gray;'>"
-        "@Ghazal Aryem • Respect platform terms of service"
+        "For educational use only • Respect platform terms of service"
         "</div>",
         unsafe_allow_html=True
     )
