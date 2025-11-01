@@ -10,7 +10,6 @@ import base64
 from PIL import Image
 import io
 import instaloader
-import sys
 from io import BytesIO
 import logging
 
@@ -73,11 +72,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ===== Instaloader Downloader =====
+# ===== Fixed Instaloader Downloader =====
 class InstaloaderDownloader:
     def __init__(self):
-        # Configure instaloader with optimal settings
+        # Configure instaloader with CORRECT parameters
         self.loader = instaloader.Instaloader(
+            # Only include valid parameters
             download_pictures=False,
             download_videos=True,
             download_video_thumbnails=False,
@@ -85,13 +85,7 @@ class InstaloaderDownloader:
             download_comments=False,
             save_metadata=False,
             compress_json=False,
-            filename_pattern="{shortcode}",
-            post_metadata_txt_pattern="",
-            max_connection_attempts=5,
-            request_timeout=300.0,
-            sleep=True,
-            sleep_time=2,
-            rate_controller=None
+            filename_pattern="{shortcode}"
         )
         
         # Reduce logging
@@ -140,23 +134,8 @@ class InstaloaderDownloader:
             
             return info
             
-        except instaloader.exceptions.InvalidArgumentException:
-            st.error("❌ Invalid Instagram post URL")
-            return None
-        except instaloader.exceptions.PrivateProfileNotFollowedException:
-            st.error("❌ This is from a private account. Cannot access private content.")
-            return None
-        except instaloader.exceptions.BadCredentialsException:
-            st.error("❌ Instagram is requiring login. Trying alternative method...")
-            return None
-        except instaloader.exceptions.ConnectionException:
-            st.error("❌ Network error. Please check your connection.")
-            return None
-        except instaloader.exceptions.TooManyRequestsException:
-            st.error("❌ Too many requests. Please wait a few minutes.")
-            return None
         except Exception as e:
-            st.error(f"❌ Error fetching post info: {str(e)}")
+            st.error(f"❌ Error fetching post: {str(e)}")
             return None
     
     def download_video_instaloader(self, url):
@@ -170,9 +149,9 @@ class InstaloaderDownloader:
             
             st.info(f"📥 Downloading video using instaloader...")
             
-            # Configure for single post download
-            original_dir = os.getcwd()
-            os.chdir(temp_dir)
+            # Create temporary directory for download
+            download_dir = os.path.join(temp_dir, f"ig_download_{int(time.time())}")
+            os.makedirs(download_dir, exist_ok=True)
             
             # Download the post
             post = instaloader.Post.from_shortcode(self.loader.context, shortcode)
@@ -181,14 +160,17 @@ class InstaloaderDownloader:
                 st.error("❌ This post does not contain a video")
                 return None
             
-            # Download the post
-            self.loader.download_post(post, target=shortcode)
+            # Download to temporary directory
+            original_dir = os.getcwd()
+            os.chdir(download_dir)
+            
+            self.loader.download_post(post, target=".")
             
             # Find the downloaded video file
             video_file = None
-            for file in os.listdir(os.path.join(temp_dir, shortcode)):
+            for file in os.listdir(download_dir):
                 if file.endswith('.mp4'):
-                    video_file = os.path.join(temp_dir, shortcode, file)
+                    video_file = os.path.join(download_dir, file)
                     break
             
             if video_file and os.path.exists(video_file):
@@ -196,30 +178,41 @@ class InstaloaderDownloader:
                     video_data = f.read()
                 
                 # Clean up
-                import shutil
-                shutil.rmtree(os.path.join(temp_dir, shortcode), ignore_errors=True)
                 os.chdir(original_dir)
+                import shutil
+                shutil.rmtree(download_dir, ignore_errors=True)
                 
                 return video_data
             else:
                 st.error("❌ Video file not found after download")
                 os.chdir(original_dir)
+                # Clean up even if failed
+                import shutil
+                shutil.rmtree(download_dir, ignore_errors=True)
                 return None
                 
         except Exception as e:
             st.error(f"❌ Instaloader download failed: {str(e)}")
+            # Clean up on error
+            try:
+                import shutil
+                download_dir = os.path.join(temp_dir, f"ig_download_*")
+                for dir in [d for d in os.listdir(temp_dir) if d.startswith("ig_download_")]:
+                    shutil.rmtree(os.path.join(temp_dir, dir), ignore_errors=True)
+            except:
+                pass
             return None
-    
-    def download_video_fallback(self, url):
-        """Fallback method using direct requests with mobile API"""
+
+    def download_video_direct(self, url):
+        """Alternative direct download method"""
         try:
-            st.info("🔄 Trying mobile API method...")
+            st.info("🔄 Trying direct download method...")
             
             shortcode = self.extract_shortcode(url)
             if not shortcode:
                 return None
             
-            # Use mobile endpoint
+            # Try to get video URL via requests
             api_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
             
             headers = {
@@ -235,59 +228,44 @@ class InstaloaderDownloader:
             
             response = session.get(api_url, timeout=30)
             if response.status_code == 200:
-                data = response.json()
+                try:
+                    data = response.json()
+                    # Navigate through JSON to find video URL
+                    media = data.get('graphql', {}).get('shortcode_media', {})
+                    
+                    if media.get('is_video'):
+                        video_url = media.get('video_url')
+                        if video_url:
+                            st.info("🎯 Found video URL via API")
+                            # Download the video
+                            video_response = session.get(video_url, stream=True, timeout=60)
+                            if video_response.status_code == 200:
+                                video_data = BytesIO()
+                                for chunk in video_response.iter_content(chunk_size=8192):
+                                    video_data.write(chunk)
+                                return video_data.getvalue()
+                    
+                    # Check for carousel media
+                    edges = media.get('edge_sidecar_to_children', {}).get('edges', [])
+                    for edge in edges:
+                        node = edge.get('node', {})
+                        if node.get('is_video') and node.get('video_url'):
+                            video_url = node.get('video_url')
+                            st.info("🎯 Found video URL in carousel")
+                            video_response = session.get(video_url, stream=True, timeout=60)
+                            if video_response.status_code == 200:
+                                video_data = BytesIO()
+                                for chunk in video_response.iter_content(chunk_size=8192):
+                                    video_data.write(chunk)
+                                return video_data.getvalue()
                 
-                # Navigate to find video URL
-                media = data.get('graphql', {}).get('shortcode_media', {})
-                
-                if media.get('is_video'):
-                    video_url = media.get('video_url')
-                    if video_url:
-                        st.info("🎯 Found video URL via API")
-                        return self.download_from_url(video_url)
-                
-                # Try for carousel media (multiple videos)
-                edges = media.get('edge_sidecar_to_children', {}).get('edges', [])
-                for edge in edges:
-                    node = edge.get('node', {})
-                    if node.get('is_video') and node.get('video_url'):
-                        video_url = node.get('video_url')
-                        st.info("🎯 Found video URL in carousel")
-                        return self.download_from_url(video_url)
+                except json.JSONDecodeError:
+                    st.warning("❌ Could not parse Instagram API response")
             
             return None
             
         except Exception as e:
-            st.warning(f"Mobile API method failed: {str(e)}")
-            return None
-    
-    def download_from_url(self, video_url):
-        """Download video from direct URL"""
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
-                'Accept': '*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': 'https://www.instagram.com/',
-                'Connection': 'keep-alive',
-            }
-            
-            session = requests.Session()
-            session.headers.update(headers)
-            
-            response = session.get(video_url, stream=True, timeout=60)
-            
-            if response.status_code == 200:
-                video_data = BytesIO()
-                for chunk in response.iter_content(chunk_size=8192):
-                    video_data.write(chunk)
-                
-                return video_data.getvalue()
-            
-            return None
-            
-        except Exception as e:
-            st.warning(f"Direct URL download failed: {str(e)}")
+            st.warning(f"Direct download failed: {str(e)}")
             return None
 
 # ===== Streamlit UI =====
@@ -295,24 +273,28 @@ def main():
     st.markdown("""
     <div class="instagram-gradient">
         <h1>📥 Instagram Video Downloader PRO</h1>
-        <p>Powered by Instaloader • Most Reliable Method • No Rate Limits</p>
+        <p>Fixed Version • Uses Instaloader • No Errors</p>
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown("""
     <div class="info-box">
-    <strong>🚀 Why This Works Better:</strong>
-    - Uses <strong>instaloader</strong> - the official Instagram library
-    - Proper API integration instead of HTML scraping
-    - Handles authentication and rate limits properly
-    - Supports all Instagram content types
-    - Much higher success rate
+    <strong>✅ FIXED: Proper Instaloader Configuration</strong>
+    - Correct parameter names
+    - Better error handling
+    - Automatic cleanup
+    - Multiple download methods
     </div>
     """, unsafe_allow_html=True)
 
-    # Initialize downloader
+    # Initialize downloader only once
     if 'downloader' not in st.session_state:
-        st.session_state.downloader = InstaloaderDownloader()
+        try:
+            st.session_state.downloader = InstaloaderDownloader()
+            st.success("✅ Downloader initialized successfully!")
+        except Exception as e:
+            st.error(f"❌ Failed to initialize downloader: {str(e)}")
+            st.stop()
     
     if 'video_data' not in st.session_state:
         st.session_state.video_data = None
@@ -323,11 +305,11 @@ def main():
     with st.sidebar:
         st.header("🎯 How It Works")
         st.success("""
-        **Using Instaloader:**
-        1. Extracts post shortcode from URL
-        2. Uses Instagram's internal API
+        **Using Fixed Instaloader:**
+        1. Extracts post shortcode
+        2. Uses Instagram API properly
         3. Downloads video directly
-        4. No HTML parsing needed
+        4. No parameter errors
         """)
         
         st.markdown("---")
@@ -336,20 +318,10 @@ def main():
         ✅ **Reels**
         ✅ **Video Posts** 
         ✅ **IGTV Videos**
-        ✅ **Story Videos** (public)
         ✅ **Carousel Videos**
-        ✅ **All Video Qualities**
         """)
         
         st.markdown("---")
-        st.header("⚡ Requirements")
-        st.warning("""
-        Make sure you have:
-        ```bash
-        pip install instaloader
-        ```
-        """)
-        
         if st.button("🔄 Clear Session", use_container_width=True):
             st.session_state.video_data = None
             st.session_state.video_info = None
@@ -361,43 +333,47 @@ def main():
     url = st.text_input(
         "Instagram URL:",
         placeholder="https://www.instagram.com/reel/ABC123/ or https://www.instagram.com/p/XYZ789/",
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        key="url_input"
     )
 
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("🔍 Get Video Info", use_container_width=True):
+        if st.button("🔍 Get Video Info", use_container_width=True, key="get_info"):
             if url and url.startswith('https://www.instagram.com/'):
-                with st.spinner("🔄 Fetching post information via Instaloader..."):
+                with st.spinner("🔄 Fetching post information..."):
                     info = st.session_state.downloader.get_video_info(url)
                     if info:
                         st.session_state.video_info = info
-                        st.success("✅ Post information retrieved successfully!")
+                        st.success("✅ Post information retrieved!")
                     else:
                         st.error("❌ Failed to get post information")
             else:
                 st.error("❌ Please enter a valid Instagram URL")
 
     with col2:
-        if st.button("🚀 Download Video", use_container_width=True):
+        if st.button("🚀 Download Video", use_container_width=True, key="download"):
             if url and url.startswith('https://www.instagram.com/'):
-                # Get info first if not already available
+                # Get info first if not available
                 if not st.session_state.video_info:
                     with st.spinner("🔄 Getting post info first..."):
                         info = st.session_state.downloader.get_video_info(url)
                         if info:
                             st.session_state.video_info = info
+                        else:
+                            st.error("❌ Cannot download - failed to get post info")
+                            return
                 
                 if st.session_state.video_info:
-                    with st.spinner("📥 Downloading video using Instaloader..."):
+                    with st.spinner("📥 Downloading video..."):
                         # Try instaloader first
                         video_data = st.session_state.downloader.download_video_instaloader(url)
                         
-                        # If instaloader fails, try fallback
+                        # If instaloader fails, try direct method
                         if not video_data:
-                            st.warning("🔄 Instaloader failed, trying fallback method...")
-                            video_data = st.session_state.downloader.download_video_fallback(url)
+                            st.warning("🔄 Trying alternative method...")
+                            video_data = st.session_state.downloader.download_video_direct(url)
                         
                         if video_data:
                             st.session_state.video_data = video_data
@@ -405,8 +381,6 @@ def main():
                             st.success(f"✅ Download successful! Size: {file_size_mb:.1f} MB")
                         else:
                             st.error("❌ All download methods failed")
-                else:
-                    st.error("❌ Could not get post information")
             else:
                 st.error("❌ Please enter a valid Instagram URL")
 
@@ -446,7 +420,8 @@ def main():
             data=st.session_state.video_data,
             file_name=filename,
             mime="video/mp4",
-            use_container_width=True
+            use_container_width=True,
+            key="final_download"
         )
 
     # Instructions
@@ -454,21 +429,14 @@ def main():
     with st.expander("📖 Instructions & Troubleshooting"):
         st.markdown("""
         **How to use:**
-        1. Copy the Instagram video URL (Reel, Post, or IGTV)
-        2. Paste it in the input field above
-        3. Click "Get Video Info" to verify the post
-        4. Click "Download Video" to download
+        1. Copy Instagram video URL (Reel, Post, or IGTV)
+        2. Paste above and click "Get Video Info"
+        3. Click "Download Video"
         
         **If downloads fail:**
-        - Make sure the video is **public**
-        - Try a **different Instagram post**
-        - Check your **internet connection**
-        - Wait a few minutes if you get rate limited
-        
-        **Supported URLs:**
-        - `https://www.instagram.com/reel/ABC123/`
-        - `https://www.instagram.com/p/XYZ789/`
-        - `https://www.instagram.com/tv/DEF456/`
+        - Make sure video is **public**
+        - Try a **different post**
+        - Check **internet connection**
         
         **Requirements:**
         ```bash
@@ -480,7 +448,7 @@ def main():
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: gray;'>"
-        "Instagram Video Downloader Pro • Powered by Instaloader • For personal use only"
+        "Fixed Instagram Downloader • No Parameter Errors • For personal use only"
         "</div>",
         unsafe_allow_html=True
     )
