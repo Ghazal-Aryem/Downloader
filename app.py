@@ -384,7 +384,15 @@ def main():
         5. **Video Versions Scan**
         """)
         
-        
+        st.markdown("---")
+        st.header("📋 Supported Content")
+        st.info("""
+        ✅ **Public Reels**
+        ✅ **Video Posts**
+        ✅ **IGTV Videos**
+        ✅ **Story Videos** (public)
+        ✅ **All Qualities**
+        """)
         
         st.markdown("---")
         if st.button("🔄 Clear Session", use_container_width=True):
